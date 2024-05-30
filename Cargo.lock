@@ -130,6 +130,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "profont"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "016681370a9dd6e7ddb4c1a959922fd59dc45e5ebaa5ff5b13090267898ced34"
+dependencies = [
+ "embedded-graphics",
+]
+
+[[package]]
 name = "ptr_meta"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -271,6 +280,7 @@ version = "0.1.0"
 dependencies = [
  "embedded-graphics",
  "log",
+ "profont",
  "rustic-mountain-core",
  "uefi",
  "uefi-graphics2",

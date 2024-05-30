@@ -3,10 +3,21 @@
 
 mod consts;
 
+extern crate alloc;
+
 use core::fmt::Display;
 
-use embedded_graphics::{draw_target::DrawTarget, geometry::Point, pixelcolor::Rgb888, Pixel};
+use alloc::{format, string::ToString};
+use embedded_graphics::{
+    draw_target::DrawTarget,
+    geometry::{OriginDimensions, Point},
+    mono_font::MonoTextStyle,
+    pixelcolor::{Rgb888, RgbColor},
+    text::Text,
+    Drawable, Pixel,
+};
 use log::info;
+use profont::PROFONT_18_POINT;
 use rustic_mountain_core::Celeste;
 use uefi::{
     helpers::system_table,
@@ -64,6 +75,12 @@ fn real_main(mut system: SystemTable<Boot>) -> Result<(), UefilesteError> {
 
     info!("created display...");
 
+    let uefi_string = format!(
+        "{:?} (v{})",
+        system.firmware_vendor().to_string(),
+        system.firmware_revision()
+    );
+
     let palette = &[
         Rgb888::new(0, 0, 0),
         Rgb888::new(29, 43, 83),
@@ -100,17 +117,35 @@ fn real_main(mut system: SystemTable<Boot>) -> Result<(), UefilesteError> {
     let key_duration = 5;
     let scale = 4;
 
+    let text_style = MonoTextStyle::new(&PROFONT_18_POINT, Rgb888::WHITE);
+
+    let display_size = display.size();
+    let celeste_topleft = Point::new(
+        display_size.width as i32 / 2 - (64 * scale),
+        display_size.height as i32 / 2 - (64 * scale),
+    );
+
     loop {
         info!("ticking...");
         engine.next_tick();
         engine.draw();
         info!("ticked...");
 
-        for x in 0..scale { 
+        Text::new(
+            &format!("CELESTE: UEFI: {}", uefi_string),
+            Point::new(0, 22),
+            text_style,
+        )
+        .draw(&mut display)?;
+
+        for x in 0..scale {
             for y in 0..scale {
                 display.draw_iter(engine.mem.graphics.iter().enumerate().map(|(i, col)| {
                     Pixel(
-                        Point::new(((i as i32 % 128) * scale) + x, ((i as i32 / 128) * scale) + y),
+                        Point::new(
+                            celeste_topleft.x + ((i as i32 % 128) * scale) + x,
+                            celeste_topleft.y + ((i as i32 / 128) * scale) + y,
+                        ),
                         palette[*col as usize],
                     )
                 }))?;
@@ -153,7 +188,7 @@ fn real_main(mut system: SystemTable<Boot>) -> Result<(), UefilesteError> {
             }
         }
 
-        boot.stall(30_000);
+        boot.stall(33_000);
     }
 }
 
