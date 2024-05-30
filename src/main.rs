@@ -10,10 +10,11 @@ use core::fmt::Display;
 use alloc::{format, string::ToString};
 use embedded_graphics::{
     draw_target::DrawTarget,
-    geometry::{OriginDimensions, Point},
+    geometry::{OriginDimensions, Point, Size},
     mono_font::MonoTextStyle,
     pixelcolor::{Rgb888, RgbColor},
-    text::Text,
+    primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, StyledDrawable},
+    text::{renderer::TextRenderer, Baseline, Text},
     Drawable, Pixel,
 };
 use log::info;
@@ -26,6 +27,7 @@ use uefi::{
         gop::GraphicsOutput,
         text::{Key, ScanCode},
     },
+    table::boot::{OpenProtocolAttributes, OpenProtocolParams},
     Char16,
 };
 use uefi_graphics2::{UefiDisplay, UefiDisplayError};
@@ -57,29 +59,40 @@ impl Display for UefilesteError {
     }
 }
 
-fn real_main(mut system: SystemTable<Boot>) -> Result<(), UefilesteError> {
-    uefi::helpers::init(&mut system).unwrap();
-    // can't do system.stdin() because of https://github.com/rust-osdev/uefi-rs/issues/838
+fn draw_text(
+    display: &mut UefiDisplay,
+    text: &str,
+    position: Point,
+    selected: bool,
+    text_style: MonoTextStyle<Rgb888>,
+    text_style_selected: MonoTextStyle<Rgb888>,
+    selected_background_style: &PrimitiveStyle<Rgb888>,
+) -> Result<(), UefilesteError> {
+    if selected {
+        let text_size = text_style_selected
+            .measure_string(text, position, Baseline::Alphabetic)
+            .bounding_box;
+        Rectangle::new(
+            Point::new(text_size.top_left.x - 2, text_size.top_left.y - 2),
+            Size::new(text_size.size.width + 4, text_size.size.height + 4),
+        )
+        .draw_styled(selected_background_style, display)?;
+        Text::new(text, position, text_style_selected).draw(display)?;
+    } else {
+        Text::new(text, position, text_style).draw(display)?;
+    }
+    Ok(())
+}
+
+fn celeste_loop(
+    mut display: UefiDisplay,
+    key_duration: u8,
+    scale: i32,
+) -> Result<(), UefilesteError> {
     let mut input_table = system_table();
     let input = input_table.stdin();
-    let boot = system.boot_services();
-
-    boot.set_watchdog_timer(0, 0x10000, None)?;
-
-    info!("CELESTE: UEFI");
-
-    let gop_handle = boot.get_handle_for_protocol::<GraphicsOutput>()?;
-    let mut gop = boot.open_protocol_exclusive::<GraphicsOutput>(gop_handle)?;
-    let mode = gop.current_mode_info();
-    let mut display = UefiDisplay::new(gop.frame_buffer(), mode);
-
-    info!("created display...");
-
-    let uefi_string = format!(
-        "{:?} (v{})",
-        system.firmware_vendor().to_string(),
-        system.firmware_revision()
-    );
+    let boot_table = system_table();
+    let boot = boot_table.boot_services();
 
     let palette = &[
         Rgb888::new(0, 0, 0),
@@ -100,24 +113,18 @@ fn real_main(mut system: SystemTable<Boot>) -> Result<(), UefilesteError> {
         Rgb888::new(255, 204, 170),
     ];
 
-    info!("init...");
     let mut engine = Celeste::new(
         consts::MAPDATA.into(),
         consts::SPRITES.into(),
         consts::FLAGS.into(),
         consts::FONTATLAS.into(),
     );
-    info!("inited...");
 
     let key_z = Char16::try_from('z').unwrap();
     let key_c = Char16::try_from('c').unwrap();
     let key_x = Char16::try_from('x').unwrap();
 
     let mut timing = [0u8; 4];
-    let key_duration = 5;
-    let scale = 4;
-
-    let text_style = MonoTextStyle::new(&PROFONT_18_POINT, Rgb888::WHITE);
 
     let display_size = display.size();
     let celeste_topleft = Point::new(
@@ -126,17 +133,8 @@ fn real_main(mut system: SystemTable<Boot>) -> Result<(), UefilesteError> {
     );
 
     loop {
-        info!("ticking...");
         engine.next_tick();
         engine.draw();
-        info!("ticked...");
-
-        Text::new(
-            &format!("CELESTE: UEFI: {}", uefi_string),
-            Point::new(0, 22),
-            text_style,
-        )
-        .draw(&mut display)?;
 
         for x in 0..scale {
             for y in 0..scale {
@@ -192,12 +190,147 @@ fn real_main(mut system: SystemTable<Boot>) -> Result<(), UefilesteError> {
     }
 }
 
-#[entry]
-fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
-    system_table.stdout().clear().unwrap();
-    match real_main(system_table) {
-        Ok(_) => Status::SUCCESS,
-        Err(UefilesteError::Uefi(err)) => err.status(),
-        Err(UefilesteError::Display(_)) => Status::UNSUPPORTED,
+fn real_main() -> Result<(), UefilesteError> {
+    // can't do system.stdin() because of https://github.com/rust-osdev/uefi-rs/issues/838
+    let system = system_table();
+    let boot = system.boot_services();
+    let mut input_table = system_table();
+    let input = input_table.stdin();
+
+    boot.set_watchdog_timer(0, 0x10000, None)?;
+
+    info!("CELESTE: UEFI");
+
+    let gop_handle = boot.get_handle_for_protocol::<GraphicsOutput>()?;
+    let mut gop = unsafe {
+        boot.open_protocol::<GraphicsOutput>(
+            OpenProtocolParams {
+                handle: gop_handle,
+                agent: boot.image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )?
+    };
+    let mode = gop.current_mode_info();
+    let mut display = UefiDisplay::new(gop.frame_buffer(), mode);
+
+    info!("created display...");
+
+    let max_scale = (display.size().width / 128).min(display.size().height / 128);
+
+    let title_string = format!(
+        "CELESTE: UEFI: {:?} ({}x{} px)",
+        system.firmware_vendor().to_string(),
+        display.size().width,
+        display.size().height,
+    );
+
+    let text_style = MonoTextStyle::new(&PROFONT_18_POINT, Rgb888::WHITE);
+    let text_style_selected = MonoTextStyle::new(&PROFONT_18_POINT, Rgb888::BLACK);
+    let bg_style_selected = PrimitiveStyleBuilder::new()
+        .fill_color(Rgb888::WHITE)
+        .build();
+
+    let mut start_game = false;
+    let mut selected: u8 = 0;
+    let mut key_duration = 15;
+    let mut scale = max_scale / 2;
+
+    let key_enter = Char16::try_from('\r').unwrap();
+
+    while !start_game {
+        display.clear(Rgb888::BLACK)?;
+
+        Text::new(&title_string, Point::new(4, 4 + (22 + 4) * 1), text_style).draw(&mut display)?;
+
+        Text::new("LEFT/RIGHT ARROW - CHANGE SETTING", Point::new(4, 4 + (22 + 4) * 2), text_style).draw(&mut display)?;
+        Text::new("UP/DOWN ARROW - CHANGE SELECTION", Point::new(4, 4 + (22 + 4) * 3), text_style).draw(&mut display)?;
+        Text::new("ENTER - PERFORM ACTION", Point::new(4, 4 + (22 + 4) * 4), text_style).draw(&mut display)?;
+
+        draw_text(
+            &mut display,
+            &format!("KEY DURATION (FRAMES): {}", key_duration),
+            Point::new(4, 4 + (22 + 4) * 5),
+            selected == 0,
+            text_style,
+            text_style_selected,
+            &bg_style_selected,
+        )?;
+
+        draw_text(
+            &mut display,
+            &format!("SCALE: {}", scale),
+            Point::new(4, 4 + (22 + 4) * 6),
+            selected == 1,
+            text_style,
+            text_style_selected,
+            &bg_style_selected,
+        )?;
+
+        draw_text(
+            &mut display,
+            "START GAME",
+            Point::new(4, 4 + (22 + 4) * 7),
+            selected == 2,
+            text_style,
+            text_style_selected,
+            &bg_style_selected,
+        )?;
+
+        display.flush();
+
+        while let Some(key) = input.read_key()? {
+            match key {
+                Key::Special(ScanCode::LEFT) => {
+                    if selected == 0 {
+                        key_duration = (key_duration - 1).max(1);
+                    } else if selected == 1 {
+                        scale = (scale - 1).max(1);
+                    }
+                }
+                Key::Special(ScanCode::RIGHT) => {
+                    if selected == 0 {
+                        key_duration = (key_duration + 1).min(30);
+                    } else if selected == 1 {
+                        scale = (scale + 1).min(max_scale);
+                    }
+                }
+                Key::Special(ScanCode::UP) => {
+                    if selected == 0 {
+                        selected = 2;
+                    }
+                    selected -= 1;
+                }
+                Key::Special(ScanCode::DOWN) => {
+                    if selected == 2 {
+                        selected = 0;
+                    }
+                    selected += 1;
+                }
+                Key::Printable(key) if key == key_enter && selected == 2 => {
+                    start_game = true;
+                }
+                _ => {}
+            }
+        }
+
+        boot.stall(33_000);
     }
+
+    display.clear(Rgb888::BLACK)?;
+
+    celeste_loop(display, key_duration, scale as i32)
+}
+
+#[entry]
+fn main(_image_handle: Handle, mut system: SystemTable<Boot>) -> Status {
+    uefi::helpers::init(&mut system).unwrap();
+    system.stdout().clear().unwrap();
+
+    info!("ret: {:?}", real_main());
+
+    system.boot_services().stall(usize::MAX);
+
+    Status::SUCCESS
 }
