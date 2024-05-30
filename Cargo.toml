@@ -1,0 +1,11 @@
+[package]
+name = "uefileste"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+embedded-graphics = "0.8.1"
+log = "0.4.21"
+uefi = { version = "0.28.0", features = ["global_allocator", "logger", "panic_handler"] }
+uefi-graphics2 = "0.1.3"
+rustic-mountain-core = { path = "rustic-mountain" }
